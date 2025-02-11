@@ -42,9 +42,9 @@ venv.bak/
 # Uploads and embeddings
 uploads/
 embeddings/
+chroma_db/
 
 # Static files
-static/
 node_modules/
 
 # Docker
