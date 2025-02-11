@@ -1,0 +1,29 @@
+# Core dependencies
+fastapi
+uvicorn
+python-dotenv
+pydantic
+Jinja2
+
+# File processing
+pymupdf
+python-docx
+
+# LangChain and related
+langchain
+langchain-huggingface
+langchain-chroma
+langchain-openai
+
+# Embeddings and vector stores
+sentence-transformers
+chromadb
+
+# Hugging Face and OpenAI
+huggingface-hub
+openai
+
+# Additional utilities
+
+typing-extensions
+loguru
