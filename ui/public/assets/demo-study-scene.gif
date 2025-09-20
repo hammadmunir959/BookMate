@@ -1,0 +1,29 @@
+This is a placeholder for your animated study scene GIF.
+
+To create your own:
+
+1. Open Blender (free 3D software)
+2. Create a scene with:
+   - Wooden desk (brown material)
+   - Open book (paper texture, pages flipping)
+   - Coffee mug (ceramic, steam particles)
+   - Window with curtains (fabric, gentle sway)
+   - Warm lighting (desk lamp)
+
+3. Animate:
+   - Book pages: Rotate Y-axis slowly (3-4 seconds per flip)
+   - Steam: Particle system rising from mug
+   - Curtains: Sine wave animation
+   - Camera: Subtle movement
+
+4. Export as GIF:
+   - Resolution: 1920x1080
+   - Frame rate: 24 FPS
+   - Duration: 6-8 seconds (looping)
+
+5. Optimize:
+   - Use online tools like EzGIF to reduce file size
+   - Target: < 2MB for web performance
+   - 256 colors maximum
+
+Replace this file with your actual animated-study-scene.gif

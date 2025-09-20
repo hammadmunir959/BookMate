@@ -1,0 +1,32 @@
+PLACEHOLDER FOR ANIMATED STUDY SCENE GIF
+
+🎨 REPLACE THIS FILE WITH YOUR ANIMATED GIF
+
+File Requirements:
+- Name: animated-study-scene.gif
+- Size: 1920x1080 (16:9)
+- Duration: 6-8 seconds (looping)
+- Frame Rate: 24 FPS
+- File Size: < 2MB (optimized)
+
+Scene Elements:
+✅ Wooden desk/table (rich mahogany texture)
+✅ Open book with slow page flipping (3-4s per flip)
+✅ Coffee mug with rising steam
+✅ Soft daylight with gentle curtain movement
+✅ Warm, inviting study atmosphere
+
+Animation Sequence:
+0-2s: Establishing shot
+2-5s: Book page turns slowly
+5-6s: Steam rises from coffee
+6-8s: Curtains sway in breeze
+8s: Loop back
+
+Tools for Creation:
+- Blender (3D modeling)
+- Adobe After Effects
+- Procreate + Photoshop
+- Free alternatives: Krita, GIMP, Pencil2D
+
+See README.md in this directory for complete specifications!
