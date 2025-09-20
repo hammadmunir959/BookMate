@@ -327,7 +327,7 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({
       maxWidth="lg"
       fullWidth
       TransitionComponent={Slide}
-      TransitionProps={{ direction: 'up' }}
+      TransitionProps={{ direction: 'up' } as any}
       PaperProps={{
         sx: {
           backgroundColor: '#1a1a1a',
