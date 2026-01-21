@@ -12,6 +12,8 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from fastapi.responses import JSONResponse
+from fastapi.concurrency import run_in_threadpool
+import asyncio
 from pydantic import BaseModel, Field
 
 from src.core.service_manager import service_manager
@@ -21,6 +23,7 @@ from src.processors.retrieval.hybrid_retriever import HybridRetriever
 from src.processors.generation.text_generator import GenerationPipeline
 from src.core.document_models import QueryType, RetrievalQuery, GenerationRequest, Citation
 from src.storage.metadata_store import sqlite_storage
+from src.storage.history_store import history_store
 from src.utils.logging_utils import StructuredLogger
 
 logger = logging.getLogger(__name__)
@@ -28,6 +31,10 @@ api_logger = StructuredLogger("api")
 
 # Create main router
 main_router = APIRouter()
+
+# Global semaphore for concurrency control
+# Limit concurrent heavy ingestion tasks to avoid resource exhaustion
+ingestion_semaphore = asyncio.Semaphore(4)
 
 # Helper function for clean display names
 def get_display_name(document_id: str) -> str:
@@ -274,6 +281,7 @@ class QueryRequest(BaseModel):
     temperature: Optional[float] = Field(0.1, description="Generation temperature")
     top_k: Optional[int] = Field(5, description="Number of chunks to retrieve")
     similarity_threshold: Optional[float] = Field(0.2, description="Minimum similarity threshold")
+    session_id: Optional[str] = Field(None, description="Session ID for conversation history")
 
 
 class CitationInfo(BaseModel):
@@ -392,13 +400,18 @@ async def ingest_document(
 
         # Process document
         processor = DocumentProcessor()
-        success, message, results = processor.process_document(
-            temp_file_path,
-            custom_metadata={"uploader_id": uploader_id} if uploader_id else None,
-            uploader_id=uploader_id,
-            force_reprocess=force_reprocess,
-            original_filename=file.filename
-        )
+        
+        # Use semaphore to limit concurrent processing
+        # Use run_in_threadpool to offload blocking I/O and CPU work
+        async with ingestion_semaphore:
+            success, message, results = await run_in_threadpool(
+                processor.process_document,
+                temp_file_path,
+                custom_metadata={"uploader_id": uploader_id} if uploader_id else None,
+                uploader_id=uploader_id,
+                force_reprocess=force_reprocess,
+                original_filename=file.filename
+            )
 
         if not success:
             steps_status[-1].status = "failed"
@@ -535,13 +548,40 @@ async def process_query(request: QueryRequest):
         # Check for source selection and return general chatbot response if no sources
         selected_document_ids = request.document_ids or ([request.document_id] if request.document_id else [])
 
+        # Prepare session and history
+        session_id = request.session_id
+        conversation_history = request.conversation_history or []
+        
+        # If session_id provided but no history in request, load from store
+        if session_id and not conversation_history:
+            try:
+                stored_history = history_store.get_history(session_id, limit=10)
+                # Convert stored history to format expected by generator
+                for msg in stored_history:
+                    conversation_history.append({
+                        "role": msg["role"],
+                        "content": msg["content"]
+                    })
+                logger.info(f"Loaded {len(conversation_history)} messages from history for session {session_id}")
+            except Exception as e:
+                logger.warning(f"Failed to load history: {e}")
+        elif not session_id:
+             # Create new session if none provided
+             session_id = history_store.create_session(title=f"Chat {request_id[:8]}")
+
         if not selected_document_ids:
             # No sources selected - return general chatbot response
             logger.info(f"No sources selected for query: '{request.query}' - returning general chatbot response")
+            
+            # Save interaction to history
+            history_store.add_message(session_id, "user", request.query)
+            chatbot_answer = f"I understand you're asking about '{request.query}'. However, I don't have access to any specific documents right now.\n\nTo provide you with accurate, document-based answers, please select the sources you want me to reference from the sidebar. You can:\n\n• Click on individual documents to select them\n• Select multiple documents for comprehensive answers\n• Upload new documents if you haven't added any yet\n\nOnce you select sources, I'll be able to search through them and provide detailed, evidence-based responses."
+            history_store.add_message(session_id, "assistant", chatbot_answer)
+            
             return QueryResponse(
                 success=True,
                 query=request.query,
-                answer=f"I understand you're asking about '{request.query}'. However, I don't have access to any specific documents right now.\n\nTo provide you with accurate, document-based answers, please select the sources you want me to reference from the sidebar. You can:\n\n• Click on individual documents to select them\n• Select multiple documents for comprehensive answers\n• Upload new documents if you haven't added any yet\n\nOnce you select sources, I'll be able to search through them and provide detailed, evidence-based responses.",
+                answer=chatbot_answer,
                 citations=[],
                 total_chunks_retrieved=0,
                 processing_stats={
@@ -728,10 +768,11 @@ INSTRUCTIONS: Reference specific content pieces by their (cit#1), (cit#2), etc. 
 INSTRUCTIONS: Consider this additional context alongside the document information.""")
 
         # 4. Conversation history
-        if request.conversation_history:
+        # Use the prepared conversation_history
+        if conversation_history:
             history_text = chr(10).join([
                 f"{msg['role'].title()}: {msg['content']}"
-                for msg in request.conversation_history[-3:]  # Last 3 messages
+                for msg in conversation_history[-3:]  # Last 3 messages for context window
             ])
             context_parts.append(f"""=== CONVERSATION HISTORY ===
 {history_text}
@@ -768,7 +809,7 @@ CRITICAL: Do NOT include any references, bibliography, or citation list at the e
             generation_type="answer",
             max_tokens=request.max_tokens,
             temperature=request.temperature,
-            conversation_history=request.conversation_history or []
+            conversation_history=conversation_history
         )
 
         # Generate response

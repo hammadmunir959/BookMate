@@ -15,6 +15,12 @@ cleanup() {
 # Trap SIGINT (Ctrl+C) to cleanup
 trap cleanup SIGINT
 
+# Activate Virtual Environment
+if [ -d "venv" ]; then
+    echo "🐍 Activating local venv..."
+    source venv/bin/activate
+fi
+
 # Check if Python and Node.js are available
 if ! command -v python3 &> /dev/null; then
     echo "❌ Python3 is required but not installed."

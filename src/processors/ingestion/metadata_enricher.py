@@ -14,6 +14,8 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.core.document_models import DocumentChunk, DocumentMetadata
+from src.utils.llm_client import llm_client
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -346,6 +348,91 @@ class MetadataEnricher:
                 'missing_citations': len(chunks),
                 'errors': [f"Validation failed: {str(e)}"]
             }
+
+    def enrich_document_with_llm(self, text_content: str, metadata: DocumentMetadata) -> DocumentMetadata:
+        """
+        Enrich document metadata using LLM extraction
+        
+        Args:
+            text_content: Document text content (will be truncated)
+            metadata: Current document metadata
+            
+        Returns:
+            Enriched DocumentMetadata
+        """
+        try:
+            # Truncate text for LLM (first 3000 chars is usually enough for metadata)
+            context_text = text_content[:3000]
+            
+            prompt = f"""
+            Analyze the following document text and extract rich metadata in JSON format.
+            
+            TEXT START:
+            {context_text}
+            ...
+            TEXT END
+            
+            Return ONLY a valid JSON object with the following keys:
+            - title: Improved title if applicable, else original
+            - author: Extracted author(s)
+            - summary: Brief 2-sentence summary
+            - keywords: List of 5-10 key topics/concepts
+            - entities: List of important named entities (people, organizations, products)
+            - language: ISO language code (e.g., 'en', 'es')
+            - category: Technical Category (e.g., 'Finance', 'Engineering', 'Medical', 'General')
+            
+            Do not include any explanation, only the JSON.
+            """
+            
+            response = llm_client.generate_text(
+                prompt=prompt,
+                max_tokens=600,
+                temperature=0.1,
+                system_prompt="You are a librarian AI specialized in metadata extraction.",
+                expect_json=True
+            )
+            
+            if response:
+                # Clean up response if it contains markdown code blocks
+                if "```json" in response:
+                    response = response.split("```json")[1].split("```")[0].strip()
+                elif "```" in response:
+                    response = response.split("```")[1].split("```")[0].strip()
+                    
+                try:
+                    rich_data = json.loads(response)
+                    
+                    # Update metadata
+                    if rich_data.get('title') and not metadata.title:
+                        metadata.title = rich_data['title']
+                    
+                    if rich_data.get('author') and not metadata.author:
+                        metadata.author = rich_data['author']
+                    
+                    if rich_data.get('language') and not metadata.language:
+                        metadata.language = rich_data['language']
+                        
+                    # Store rich metadata in custom_metadata for SQLite storage
+                    metadata.custom_metadata['rich_metadata'] = rich_data
+                    metadata.custom_metadata['summary'] = rich_data.get('summary')
+                    metadata.custom_metadata['keywords'] = rich_data.get('keywords')
+                    
+                    # Update tags with keywords
+                    if rich_data.get('keywords'):
+                        current_tags = set(metadata.tags)
+                        current_tags.update(rich_data['keywords'])
+                        metadata.tags = list(current_tags)
+                        
+                    logger.info(f"Successfully extracted rich metadata for {metadata.filename}")
+                    
+                except json.JSONDecodeError:
+                    logger.warning("Failed to parse LLM response for metadata extraction")
+            
+            return metadata
+
+        except Exception as e:
+            logger.error(f"Error in LLM metadata enrichment: {str(e)}")
+            return metadata
 
 
 # Standalone testing function

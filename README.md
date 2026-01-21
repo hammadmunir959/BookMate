@@ -1,4 +1,4 @@
-# 🤖 BookMMate
+# 🤖 BookMate
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/)
@@ -7,17 +7,27 @@
 
  BookMate, A production-ready microservice that combines document ingestion, intelligent retrieval, and answer generation into a complete RAG (Retrieval-Augmented Generation) system. Built with FastAPI, ChromaDB, and GROQ's API.
 
-## 🌟 Key Features
+## 🌟 Features & How It Works
 
-- **🔄 Complete RAG Pipeline**: Single service handling ingestion → retrieval → generation
-- **📚 Multi-Format Support**: PDF, DOCX, TXT, HTML, MD, RTF documents
-- **🔍 Hybrid Search**: Semantic + keyword search with intelligent ranking
-- **📝 Citation-Aware Responses**: Automatic source citation with clickable references
-- **⚡ High Performance**: In-memory data flow with advanced caching
-- **🐳 Docker Ready**: Production-ready containerization
-- **🔧 Flexible Configuration**: Environment-based configuration for all components
-- **📊 Comprehensive Monitoring**: Health checks, metrics, and structured logging
-- **🎨 Modern UI**: React-based frontend with Material-UI components
+### 1. 🧠 Intelligent Ingestion
+- **Concurrent Processing**: Uses semaphores to ingest multiple documents safely in parallel (`src/api/simplified_router.py`).
+- **Rich Metadata**: Extracts titles, authors, and dates to enhance search relevance.
+- **Semantic Chunking**: Intelligent text splitting respecting paragraph boundaries for better context preserveration.
+
+### 2. 🔍 Hybrid Retrieval (RRF)
+- **Dual Search**: Combines **BM25** (keyword match) and **ChromaDB** (semantic vector match).
+- **Reciprocal Rank Fusion**: Merges results from both methods to find the "best of both worlds" (`src/processors/retrieval/retrieval_pipeline.py`).
+- **Cross-Encoder Reranking**: Re-scores top candidates using a high-precision model for superior accuracy.
+
+### 3. 💬 Context-Aware Generation
+- **History Tracking**: Remembers previous turns to handle follow-up questions effectively.
+- **Citation Engine**: Maps generated answers back to specific text chunks for verifiable truth.
+- **Hallucination Guard**: Grounded generation strictly based on retrieved context.
+
+### 4. 🛡️ Robust & Scalable
+- **Atomic Deletion**: Ensures documents are completely wiped from ALL storage layers (SQLite, ChromaDB, Cache) in a single transaction.
+- **Containerization**: Fully Dockerized with multi-stage builds for production deployment.
+- **Resilience**: Automatic retries, health monitoring, and comprehensive structured logging.
 
 ## 🏗️ Architecture
 
@@ -29,6 +39,7 @@
 │  ┌─────────────┐ ┌─────────────┐ ┌───────────────────────┐ │
 │  │   Ingestion │ │ Retrieval   │ │   Generation          │ │
 │  │   Pipeline  │ │   Pipeline  │ │   Pipeline            │ │
+│  │ (Concurrent)│ │ (Hybrid)    │ │   (RAG)               │ │
 │  └─────────────┘ └─────────────┘ └───────────────────────┘ │
 ├─────────────────────────────────────────────────────────────┤
 │  ┌─────────────┐ ┌─────────────┐ ┌───────────────────────┐ │
@@ -51,6 +62,7 @@
 - [API Documentation](#-api-documentation)
 - [Usage Examples](#-usage-examples)
 - [Deployment](#-deployment)
+- [System Evaluation](#-system-evaluation)
 - [Development](#-development)
 - [Testing](#-testing)
 - [Performance](#-performance)
@@ -61,16 +73,17 @@
 
 ### Prerequisites
 
-- Python 3.11+
+- Python 3.10+
 - Node.js 16+ (for UI development)
 - GROQ API key (get one at [groq.com](https://groq.com))
+- Docker (optional, for containerized run)
 
 ### 1. Clone and Setup
 
 ```bash
 # Clone the repository
-git clone <your-repo-url>
-cd rag-microservice
+git clone https://github.com/hammadmunir959/BookMate.git
+cd BookMate
 
 # Copy environment configuration
 cp env.example .env
@@ -79,9 +92,13 @@ cp env.example .env
 nano .env
 ```
 
-### 2. Install Dependencies
+### 2. Install Dependencies (Local)
 
 ```bash
+# Create virtual environment (recommended)
+python3 -m venv venv
+source venv/bin/activate
+
 # Install Python dependencies
 pip install -r requirements.txt
 
@@ -366,6 +383,23 @@ curl http://localhost:8000/health
 # List all documents
 curl http://localhost:8000/documents/list
 ```
+
+## 🧪 System Evaluation
+
+A comprehensive evaluation suite is included to verify system reliability, concurrency, and performance.
+
+### Running the Evaluation
+To run the rigorous system tests:
+```bash
+python tests/evaluate_system.py
+```
+
+This script evaluates:
+1. **Thread-Safe Ingestion**: Verifies concurrent document processing without race conditions.
+2. **Retrieval Performance**: Measures precision and latency of hybrid search.
+3. **Atomic Deletion**: Ensures that deleting a document removes all traces from Vector DB, SQLite, and Cache.
+
+Results are generated in `evaluation_results.md`.
 
 ## 🐳 Deployment
 

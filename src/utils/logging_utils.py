@@ -9,6 +9,8 @@ import functools
 from typing import Any, Dict, Optional, Callable, List
 from contextlib import contextmanager
 import asyncio
+import json
+from datetime import datetime
 
 from src.core.config import config
 
@@ -106,13 +108,21 @@ class StructuredLogger:
         """Internal method for structured logging"""
         try:
             if config.logging.enable_structured_logging:
+                # Create JSON log entry
+                log_entry = {
+                    "level": level,
+                    "message": message,
+                    "timestamp": datetime.now().isoformat(),
+                    **kwargs
+                }
+                full_message = json.dumps(log_entry)
+            else:
                 extra_info = " | ".join(f"{k}={v}" for k, v in kwargs.items() if v is not None)
                 if extra_info:
                     full_message = f"{message} | {extra_info}"
                 else:
                     full_message = message
-            else:
-                full_message = message
+
 
             self.logger.log(getattr(logging, level.upper(), logging.INFO), full_message)
 

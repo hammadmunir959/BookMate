@@ -41,6 +41,8 @@ class ChunkingConfig:
     preserve_sections: bool = True
     use_smart_splitting: bool = True
     respect_structural_boundaries: bool = True
+    enable_semantic_chunking: bool = False
+    semantic_similarity_threshold: float = 0.7
 
     def __post_init__(self):
         if self.chunk_size is None:
@@ -68,7 +70,8 @@ class EnhancedDocumentChunker:
     def chunk_document_with_structure(
         self,
         extracted_content: ExtractedContent,
-        document_id: str
+        document_id: str,
+        embedding_model = None
     ) -> List[DocumentChunk]:
         """
         Chunk a document with structural awareness
@@ -98,7 +101,8 @@ class EnhancedDocumentChunker:
                     extracted_content.metadata,
                     document_id,
                     chunk_index,
-                    current_position
+                    current_position,
+                    embedding_model
                 )
 
                 chunks.extend(unit_chunks)
@@ -118,7 +122,8 @@ class EnhancedDocumentChunker:
         document_metadata: DocumentMetadata,
         document_id: str,
         start_chunk_index: int,
-        start_position: int
+        start_position: int,
+        embedding_model = None
     ) -> List[DocumentChunk]:
         """Chunk a single structural unit"""
         try:
@@ -143,7 +148,13 @@ class EnhancedDocumentChunker:
                 return chunks
 
             # Need to split into multiple chunks
-            if self.config.respect_structural_boundaries:
+            if self.config.enable_semantic_chunking and embedding_model:
+                chunks = self._chunk_semantically(
+                    unit, document_metadata, document_id,
+                    start_chunk_index, start_position,
+                    embedding_model
+                )
+            elif self.config.respect_structural_boundaries:
                 # Try to split by sentences first
                 chunks = self._chunk_by_sentences(
                     unit, document_metadata, document_id, 
@@ -229,6 +240,84 @@ class EnhancedDocumentChunker:
             logger.error(f"Error chunking by sentences: {str(e)}")
             # Fallback to token-based chunking
             return self._chunk_by_tokens(unit, document_metadata, document_id, start_chunk_index, start_position)
+
+    def _chunk_semantically(
+        self,
+        unit: StructuralUnit,
+        document_metadata: DocumentMetadata,
+        document_id: str,
+        start_chunk_index: int,
+        start_position: int,
+        embedding_model
+    ) -> List[DocumentChunk]:
+        """Chunk by semantic similarity using embedding model"""
+        try:
+            import numpy as np
+            from sklearn.metrics.pairwise import cosine_similarity
+            
+            chunks = []
+            sentences = sent_tokenize(unit.text)
+            
+            if not sentences:
+                return []
+                
+            # Generate embeddings for all sentences
+            embeddings = embedding_model.encode(sentences)
+            
+            current_chunk_sentences = [sentences[0]]
+            current_chunk_tokens = len(self.tokenizer.tokenize(sentences[0]))
+            chunk_index = start_chunk_index
+            current_position = start_position
+            
+            for i in range(1, len(sentences)):
+                sentence = sentences[i]
+                sentence_tokens = len(self.tokenizer.tokenize(sentence))
+                
+                # Calculate similarity with current chunk context (using last sentence or average)
+                # Here we compare with the previous sentence for transition smoothness
+                sim = cosine_similarity([embeddings[i]], [embeddings[i-1]])[0][0]
+                
+                is_similar = sim >= self.config.semantic_similarity_threshold
+                tokens_within_limit = (current_chunk_tokens + sentence_tokens) <= self.config.chunk_size
+                
+                if (is_similar and tokens_within_limit) or (current_chunk_tokens < self.config.min_chunk_size):
+                    # Append to current chunk
+                    current_chunk_sentences.append(sentence)
+                    current_chunk_tokens += sentence_tokens
+                else:
+                    # Finalize current chunk
+                    chunk_text = " ".join(current_chunk_sentences)
+                    chunk = self._create_chunk_from_unit(
+                        unit, document_metadata, document_id,
+                        chunk_index, current_position,
+                        chunk_text, current_chunk_tokens
+                    )
+                    chunks.append(chunk)
+                    
+                    # Start new chunk
+                    current_position += len(chunk_text) + 1 # +1 for space
+                    chunk_index += 1
+                    current_chunk_sentences = [sentence]
+                    current_chunk_tokens = sentence_tokens
+            
+            # Add final chunk
+            if current_chunk_sentences:
+                chunk_text = " ".join(current_chunk_sentences)
+                chunk = self._create_chunk_from_unit(
+                    unit, document_metadata, document_id,
+                    chunk_index, current_position,
+                    chunk_text, current_chunk_tokens
+                )
+                chunks.append(chunk)
+                
+            return chunks
+            
+        except ImportError:
+            logger.warning("sklearn not installed, falling back to sentence chunking")
+            return self._chunk_by_sentences(unit, document_metadata, document_id, start_chunk_index, start_position)
+        except Exception as e:
+            logger.error(f"Error in semantic chunking: {str(e)}")
+            return self._chunk_by_sentences(unit, document_metadata, document_id, start_chunk_index, start_position)
 
     def _chunk_by_tokens(
         self,

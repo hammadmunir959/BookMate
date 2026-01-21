@@ -13,6 +13,7 @@ from src.processors.retrieval.semantic_retriever import SemanticRetriever
 from src.processors.retrieval.keyword_retriever import KeywordRetriever
 from src.processors.retrieval.query_parser import QueryParser
 from src.processors.retrieval.query_rephraser import QueryRephraser
+from src.processors.retrieval.reranker import Reranker
 from src.utils.logging_utils import retrieval_logger
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ class HybridRetriever:
         self.keyword_retriever = KeywordRetriever()
         self.query_parser = QueryParser()
         self.query_rephraser = QueryRephraser()
+        self.reranker = Reranker()
         self.hybrid_weight = config.retrieval.hybrid_weight
     
     def retrieve(self, query: RetrievalQuery) -> List[RetrievalResult]:
@@ -128,6 +130,30 @@ class HybridRetriever:
 
             # Apply final ranking
             final_results = self._apply_hybrid_ranking(combined_results, query)
+            
+            # Apply Cross-Encoder Reranking
+            if config.retrieval.enable_reranking and query.enable_reranking:
+                # We rerank the top candidates (e.g. top 50) to get the best top-k (e.g. top 10)
+                rerank_candidates = final_results[:config.retrieval.rerank_top_k]
+                reranked_results = self.reranker.rerank(
+                    query=query.query,
+                    results=rerank_candidates,
+                    top_k=query.top_k
+                )
+                
+                # If reranking succeeded (returned results), use them
+                if reranked_results:
+                    final_results = reranked_results
+                    retrieval_logger.log_retrieval_step("reranking", query_id, f"reranked top {len(rerank_candidates)} -> {len(final_results)} results")
+                else:
+                    # Reranker might be disabled or failed, fallback to hybird results limited to top_k
+                    final_results = final_results[:query.top_k]
+                    retrieval_logger.log_retrieval_step("reranking", query_id, "skipped/failed")
+            else:
+                # Just slice top-k if no reranking
+                final_results = final_results[:query.top_k]
+                retrieval_logger.log_retrieval_step("reranking", query_id, "disabled")
+
             retrieval_logger.log_retrieval_step("final_ranking", query_id, f"ranked {len(final_results)} final results")
 
             processing_time = time.time() - start_time
@@ -235,33 +261,44 @@ class HybridRetriever:
         try:
             # Create a dictionary to store combined results
             combined_dict = {}
+            rrf_scores = {}
+            k = config.retrieval.rrf_k
             
-            # Add semantic results
-            for result in semantic_results:
+            # Process semantic results
+            for i, result in enumerate(semantic_results):
                 chunk_id = result.chunk_id
                 if chunk_id not in combined_dict:
                     combined_dict[chunk_id] = result
-                else:
-                    # Update existing result with semantic score
-                    existing = combined_dict[chunk_id]
-                    existing.semantic_score = result.semantic_score
-                    existing.retrieval_method = "hybrid"
-            
-            # Add keyword results
-            for result in keyword_results:
+                
+                # RRF calculation for semantic rank (i+1)
+                rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0.0) + (1.0 / (k + i + 1))
+                
+                # Update existing result
+                combined_dict[chunk_id].semantic_score = result.semantic_score
+                combined_dict[chunk_id].retrieval_method = "hybrid"
+
+            # Process keyword results
+            for i, result in enumerate(keyword_results):
                 chunk_id = result.chunk_id
                 if chunk_id not in combined_dict:
                     combined_dict[chunk_id] = result
-                else:
-                    # Update existing result with keyword score
-                    existing = combined_dict[chunk_id]
-                    existing.keyword_score = result.keyword_score
-                    existing.retrieval_method = "hybrid"
-            
+                    combined_dict[chunk_id].semantic_score = 0.0 # Initialize if new
+                
+                # RRF calculation for keyword rank (i+1)
+                rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0.0) + (1.0 / (k + i + 1))
+                
+                # Update existing result
+                combined_dict[chunk_id].keyword_score = result.keyword_score
+                combined_dict[chunk_id].retrieval_method = "hybrid"
+
+            # Assign RRF scores as final_score
+            for chunk_id, result in combined_dict.items():
+                result.final_score = rrf_scores[chunk_id]
+
             # Convert to list
             combined_results = list(combined_dict.values())
             
-            logger.debug(f"Combined {len(semantic_results)} semantic + {len(keyword_results)} keyword = {len(combined_results)} unique results")
+            logger.debug(f"Combined {len(semantic_results)} semantic + {len(keyword_results)} keyword = {len(combined_results)} unique results via RRF")
             return combined_results
             
         except Exception as e:
@@ -272,16 +309,35 @@ class HybridRetriever:
     def _apply_hybrid_ranking(self, results: List[RetrievalResult], query: RetrievalQuery) -> List[RetrievalResult]:
         """Apply hybrid ranking to combined results"""
         try:
+            # RRF constants
+            k = config.retrieval.rrf_k
+            
+            # Create dictionaries to store ranks
+            semantic_ranks = {res.chunk_id: i + 1 for i, res in enumerate(results) if res.retrieval_method == "semantic" or res.retrieval_method == "semantic_expanded"}
+            keyword_ranks = {res.chunk_id: i + 1 for i, res in enumerate(results) if res.retrieval_method == "keyword" or res.retrieval_method == "keyword_expanded"}
+            
+            # If results are mixed in the input list, we need to be careful. 
+            # Actually, `results` passed here comes from `_combine_results` which merged them.
+            # But `_combine_results` doesn't preserve separate rankings well. 
+            # Better approach: Calculate RRF in `_combine_results` or expect `results` to have original ranks.
+            # Let's recalculate based on scores since we know they entered sorted.
+            # Wait, `_combine_results` destroys the order.
+            
+            # Re-implementation:
+            # We will calculate RRF score based on the available scores which proxy for rank if we trust the source.
+            # But better yet, we should compute RRF inside _combine_results where we have separate lists.
+            # So this method will just sort.
+            
+            # Let's actually move the RRF logic to _combine_results for correctness.
+            # But keeping the signature, we assume `results` has `semantic_score` and `keyword_score` populated.
+            # We can't infer rank solely from score across methods.
+            
+            # Correction: I will modify _combine_results to compute RRF.
+            # This method will then just apply metadata boosts and sort.
+            
             for result in results:
-                # Calculate hybrid score
-                semantic_score = result.semantic_score
-                keyword_score = result.keyword_score
-                
-                # Apply hybrid weighting
-                hybrid_score = (
-                    self.hybrid_weight * semantic_score + 
-                    (1.0 - self.hybrid_weight) * keyword_score
-                )
+                # Use the RRF score calculated in _combine_results
+                hybrid_score = result.final_score
                 
                 # Apply metadata boosts
                 boosted_score = self._apply_metadata_boosts(hybrid_score, result, query)

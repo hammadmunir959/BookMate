@@ -44,6 +44,7 @@ class ModelConfig:
     # Embedding model configuration
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_dimension: int = 384
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 
 @dataclass
@@ -85,7 +86,13 @@ class IngestionConfig:
     min_chunk_summary_length: int = 50
     max_chunk_summary_length: int = 200
     batch_size: int = 5
+    batch_size: int = 5
     batch_summary_sentences: int = 6
+
+    # Advanced Ingestion
+    enable_semantic_chunking: bool = False
+    semantic_similarity_threshold: float = 0.7
+    enable_rich_metadata: bool = True
 
 
 @dataclass
@@ -103,6 +110,7 @@ class RetrievalConfig:
     top_k_max: int = 20
     similarity_threshold: float = 0.2
     hybrid_weight: float = 0.7
+    rrf_k: int = 60
 
     # Advanced retrieval settings
     enable_reranking: bool = True
@@ -317,7 +325,9 @@ def load_config() -> Config:
         openai_base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
         openai_model=os.getenv("OPENAI_MODEL", "gpt-3.5-turbo"),
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
-        anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-3-haiku-20240307")
+        anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-3-haiku-20240307"),
+        embedding_model=os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
+        reranker_model=os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
     )
 
     # Database Configuration - Use absolute paths to avoid /app issues
@@ -350,7 +360,10 @@ def load_config() -> Config:
         min_chunk_summary_length=int(os.getenv("MIN_CHUNK_SUMMARY_LENGTH", "50")),
         max_chunk_summary_length=int(os.getenv("MAX_CHUNK_SUMMARY_LENGTH", "200")),
         batch_size=int(os.getenv("INGESTION_BATCH_SIZE", "5")),
-        batch_summary_sentences=int(os.getenv("BATCH_SUMMARY_SENTENCES", "6"))
+        batch_summary_sentences=int(os.getenv("BATCH_SUMMARY_SENTENCES", "6")),
+        enable_semantic_chunking=os.getenv("ENABLE_SEMANTIC_CHUNKING", "false").lower() == "true",
+        semantic_similarity_threshold=float(os.getenv("SEMANTIC_SIMILARITY_THRESHOLD", "0.7")),
+        enable_rich_metadata=os.getenv("ENABLE_RICH_METADATA", "true").lower() == "true"
     )
 
     # Retrieval Configuration
@@ -363,6 +376,7 @@ def load_config() -> Config:
         top_k_max=int(os.getenv("TOP_K_MAX", "20")),
         similarity_threshold=float(os.getenv("SIMILARITY_THRESHOLD", "0.2")),
         hybrid_weight=float(os.getenv("HYBRID_WEIGHT", "0.7")),
+        rrf_k=int(os.getenv("RRF_K", "60")),
         enable_reranking=os.getenv("ENABLE_RERANKING", "true").lower() == "true",
         rerank_top_k=int(os.getenv("RERANK_TOP_K", "10")),
         max_query_length=int(os.getenv("MAX_QUERY_LENGTH", "1000")),

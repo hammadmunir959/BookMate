@@ -10,6 +10,8 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from enum import Enum
 
+from src.storage.metadata_store import sqlite_storage
+
 logger = logging.getLogger(__name__)
 
 
@@ -134,6 +136,9 @@ class IngestionStepTracker:
             steps=list(self.steps.values())
         )
         
+        # Create job in database
+        self.job_id = sqlite_storage.create_job(document_id, stage="started")
+        
         logger.info(f"Initialized step tracker for document {document_id}")
     
     def start_step(self, step_name: str, metadata: Optional[Dict[str, Any]] = None) -> StepInfo:
@@ -167,6 +172,10 @@ class IngestionStepTracker:
             "progress": f"{self.report.completed_steps}/{self.report.total_steps}",
             "timestamp": datetime.now().isoformat()
         })
+        
+        # Update job status
+        if self.job_id:
+            sqlite_storage.update_job_status(self.job_id, stage=step_name, status="processing")
         
         logger.info(f"Started step '{step_name}' for document {self.document_id}")
         return step
@@ -271,6 +280,10 @@ class IngestionStepTracker:
             "timestamp": datetime.now().isoformat()
         })
         
+        # Update job status
+        if self.job_id:
+            sqlite_storage.update_job_status(self.job_id, stage="completed", status="completed")
+        
         logger.info(f"Completed ingestion for document {self.document_id}")
     
     def fail_ingestion(self, error_message: str):
@@ -291,6 +304,10 @@ class IngestionStepTracker:
             "error": error_message,
             "timestamp": datetime.now().isoformat()
         })
+        
+        # Update job status
+        if self.job_id:
+            sqlite_storage.update_job_status(self.job_id, stage="failed", status="failed")
         
         logger.error(f"Failed ingestion for document {self.document_id}: {error_message}")
     

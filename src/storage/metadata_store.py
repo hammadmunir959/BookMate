@@ -64,9 +64,22 @@ class SQLiteStorage:
                         metadata_json TEXT,
                         citation_mode TEXT DEFAULT 'page',
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        rich_metadata_json TEXT,
+                        error_log TEXT
                     )
                 ''')
+                
+                # Manual migration for new columns (safely)
+                try:
+                    cursor.execute("ALTER TABLE documents ADD COLUMN rich_metadata_json TEXT")
+                except sqlite3.OperationalError:
+                    pass # Column likely exists
+                    
+                try:
+                    cursor.execute("ALTER TABLE documents ADD COLUMN error_log TEXT")
+                except sqlite3.OperationalError:
+                    pass # Column likely exists
                 
                 # Document summaries table
                 cursor.execute('''
@@ -96,6 +109,8 @@ class SQLiteStorage:
                         metadata TEXT,
                         summary TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        page_number INTEGER,
+                        section_header TEXT,
                         FOREIGN KEY (document_id) REFERENCES documents (document_id)
                     )
                 ''')
@@ -133,6 +148,19 @@ class SQLiteStorage:
                     )
                 ''')
                 
+                # Jobs table for async tracking
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS jobs (
+                        job_id TEXT PRIMARY KEY,
+                        document_id TEXT NOT NULL,
+                        stage TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (document_id) REFERENCES documents (document_id)
+                    )
+                ''')
+
                 # Create indexes for better performance
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_documents_status ON documents (status)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_documents_uploaded_at ON documents (uploaded_at)')
@@ -140,6 +168,22 @@ class SQLiteStorage:
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_chunk_summaries_document_id ON chunk_summaries (document_id)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_citation_document_id ON citation_metadata (document_id)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_citation_chunk_id ON citation_metadata (chunk_id)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_jobs_document_id ON jobs (document_id)')
+                
+                # Execute migrations (ignore errors if columns exist)
+                migrations = [
+                   "ALTER TABLE documents ADD COLUMN rich_metadata_json TEXT",
+                   "ALTER TABLE documents ADD COLUMN error_log TEXT",
+                   "ALTER TABLE chunks ADD COLUMN page_number INTEGER",
+                   "ALTER TABLE chunks ADD COLUMN section_header TEXT"
+                ]
+                
+                for migration in migrations:
+                    try:
+                        cursor.execute(migration)
+                    except sqlite3.OperationalError:
+                        # Column likely exists
+                        pass
                 
                 conn.commit()
                 logger.info("Database tables initialized successfully")
@@ -627,7 +671,7 @@ class SQLiteStorage:
                 chunk_conditions.append("LOWER(content) LIKE ?")
                 chunk_params.append(f"%{term}%")
 
-            chunk_where_clause = " AND ".join(chunk_conditions) if chunk_conditions else "1=1"
+            chunk_where_clause = "(" + " OR ".join(chunk_conditions) + ")" if chunk_conditions else "1=1"
 
             # Add document filtering if provided
             if filters:
@@ -930,13 +974,18 @@ class SQLiteStorage:
                 cursor = conn.cursor()
                 
                 # Delete in order to respect foreign key constraints
+                # Child tables first
                 cursor.execute('DELETE FROM citation_metadata WHERE document_id = ?', (document_id,))
                 cursor.execute('DELETE FROM chunk_summaries WHERE document_id = ?', (document_id,))
                 cursor.execute('DELETE FROM document_summaries WHERE document_id = ?', (document_id,))
+                cursor.execute('DELETE FROM chunks WHERE document_id = ?', (document_id,))
+                cursor.execute('DELETE FROM jobs WHERE document_id = ?', (document_id,))
+                
+                # Parent table last
                 cursor.execute('DELETE FROM documents WHERE document_id = ?', (document_id,))
                 
                 conn.commit()
-                logger.info(f"Deleted document {document_id} and all related data")
+                logger.info(f"Deleted document {document_id} and all related data from all tables")
                 return True
                 
         except Exception as e:
@@ -971,6 +1020,80 @@ class SQLiteStorage:
         except Exception as e:
             logger.error(f"Error updating document status: {str(e)}")
             return False
+
+    def create_job(self, document_id: str, stage: str = "queued") -> str:
+        """
+        Create a new job for tracking document processing
+        
+        Args:
+            document_id: Document identifier
+            stage: Initial stage
+            
+        Returns:
+            Job ID
+        """
+        job_id = str(uuid.uuid4())
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO jobs (job_id, document_id, stage, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (job_id, document_id, stage, "pending", datetime.now().isoformat(), datetime.now().isoformat()))
+                conn.commit()
+                return job_id
+        except Exception as e:
+            logger.error(f"Error creating job: {str(e)}")
+            return ""
+
+    def update_job_status(self, job_id: str, stage: str, status: str) -> bool:
+        """
+        Update job status
+        
+        Args:
+            job_id: Job identifier
+            stage: Current stage
+            status: Status (pending, processing, completed, failed)
+            
+        Returns:
+            True if successful
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE jobs 
+                    SET stage = ?, status = ?, updated_at = ?
+                    WHERE job_id = ?
+                ''', (stage, status, datetime.now().isoformat(), job_id))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Error updating job status: {str(e)}")
+            return False
+
+    def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get job details
+        
+        Args:
+            job_id: Job identifier
+            
+        Returns:
+            Job dictionary or None
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT * FROM jobs WHERE job_id = ?', (job_id,))
+                row = cursor.fetchone()
+                if row:
+                    columns = [description[0] for description in cursor.description]
+                    return dict(zip(columns, row))
+                return None
+        except Exception as e:
+            logger.error(f"Error getting job: {str(e)}")
+            return None
 
 
 # Global SQLite storage instance
@@ -1071,3 +1194,4 @@ metadata_store = SQLiteStorage()
 if __name__ == "__main__":
     # Run test
     test_sqlite_storage()
+

@@ -9,9 +9,46 @@ import time
 
 from src.core.config import config
 from src.core.document_models import RetrievalQuery, RetrievalResult, QueryType
-from src.storage.metadata_store import metadata_store
+from src.utils.logging_utils import retrieval_logger
+import math
+from collections import Counter
+
+from src.utils.logging_utils import retrieval_logger
+import math
+from collections import Counter
 
 logger = logging.getLogger(__name__)
+
+
+class SimpleBM25:
+    """Simple BM25 implementation for re-ranking"""
+    
+    def __init__(self, k1: float = 1.5, b: float = 0.75):
+        self.k1 = k1
+        self.b = b
+        
+    def score(self, query: str, document: str, avg_doc_len: float) -> float:
+        """Calculate BM25 score for a document against a query"""
+        score = 0.0
+        doc_tokens = document.lower().split()
+        doc_len = len(doc_tokens)
+        doc_counts = Counter(doc_tokens)
+        
+        query_tokens = query.lower().split()
+        
+        for token in query_tokens:
+            if token not in doc_counts:
+                continue
+                
+            freq = doc_counts[token]
+            idf = 1.0  # Simplified IDF (assuming rare terms are informative enough)
+            
+            numerator = idf * freq * (self.k1 + 1)
+            denominator = freq + self.k1 * (1 - self.b + self.b * (doc_len / avg_doc_len))
+            
+            score += numerator / denominator
+            
+        return score
 
 
 class KeywordRetriever:
@@ -39,24 +76,41 @@ class KeywordRetriever:
                 logger.info("Keyword search disabled, returning empty results")
                 return []
             
-            # Perform keyword search
+            # Perform keyword search with expanded limit for re-ranking
+            # We fetch more results than needed (3x top_k) to allow for re-ranking
+            candidate_limit = max(query.top_k * 3, 20)
+            
             search_results = self.metadata_store.keyword_search(
                 query=query.query,
-                limit=query.top_k,
+                limit=candidate_limit,
                 filters=query.filters
             )
 
-            # Convert dictionaries to RetrievalResult objects
-            results = []
+            if not search_results:
+                logger.info("No keyword results found")
+                return []
+
+            # Calculate average document length for BM25
+            total_len = sum(res.get('token_count', 0) for res in search_results)
+            avg_doc_len = total_len / len(search_results) if len(search_results) > 0 else 100
+            
+            # Re-rank using SimpleBM25
+            bm25 = SimpleBM25()
+            scored_candidates = []
+            
             for chunk_dict in search_results:
+                content = chunk_dict.get('content', '')
+                score = bm25.score(query.query, content, avg_doc_len)
+                
+                # Create result object
                 result = RetrievalResult(
-                    chunk_id=chunk_dict.get('chunk_id', f"{chunk_dict['document_id']}_chunk"),
+                    chunk_id=chunk_dict.get('chunk_id', f"{chunk_dict['document_id']}_chunk_{chunk_dict.get('chunk_index')}"),
                     document_id=chunk_dict['document_id'],
-                    content=chunk_dict.get('content', ''),  # Use actual chunk content
-                    relevance_score=0.5,  # Default relevance for keyword matches
+                    content=content,
+                    relevance_score=0.0,  # Will be normalized later
                     semantic_score=0.0,
-                    keyword_score=1.0,
-                    final_score=0.5,
+                    keyword_score=score,
+                    final_score=score,
                     citation="",
                     metadata={
                         'title': chunk_dict.get('title', ''),
@@ -69,13 +123,29 @@ class KeywordRetriever:
                         'start_position': chunk_dict.get('start_position', 0),
                         'end_position': chunk_dict.get('end_position', 0)
                     },
-                    ranking_position=len(results) + 1,
+                    ranking_position=0,
                     retrieval_method="keyword"
                 )
-                results.append(result)
+                scored_candidates.append(result)
             
+            # Sort by score
+            scored_candidates.sort(key=lambda x: x.keyword_score, reverse=True)
+            
+            # Take top_k
+            results = scored_candidates[:query.top_k]
+            
+            # Normalize scores (0-1 approx)
+            if results:
+                max_score = results[0].keyword_score
+                if max_score > 0:
+                    for res in results:
+                        res.keyword_score = res.keyword_score / max_score
+                        res.final_score = res.keyword_score
+                        # Update ranking position
+                        res.ranking_position = results.index(res) + 1
+
             processing_time = time.time() - start_time
-            logger.info(f"Keyword retrieval completed in {processing_time:.3f}s, found {len(results)} results")
+            logger.info(f"Keyword retrieval with BM25 re-ranking completed in {processing_time:.3f}s, found {len(results)} results")
             
             return results
             

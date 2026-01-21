@@ -44,13 +44,22 @@ class DocumentProcessor:
             # Initialize components
             self.validator = DocumentValidator()
             self.text_extractor = EnhancedDocumentTextExtractor()
-            self.chunker = EnhancedDocumentChunker()
+            
+            # Initialize chunker with semantic chunking enabled if configured
+            chunking_config = ChunkingConfig(
+                enable_semantic_chunking=config.ingestion.enable_semantic_chunking if hasattr(config.ingestion, 'enable_semantic_chunking') else False
+            )
+            self.chunker = EnhancedDocumentChunker(config=chunking_config)
+            
             self.metadata_enricher = MetadataEnricher()
             self.citation_manager = CitationManager()
             self.summarizer = DocumentSummarizer(batch_size=10)
 
             # Ensure necessary directories exist
             self._ensure_directories()
+            
+            # Placeholder for embedding model
+            self._embedding_model = None
 
             logger.info("DocumentProcessor initialized successfully")
             
@@ -168,10 +177,33 @@ class DocumentProcessor:
             processing_results['steps_completed'].append("text_extraction")
             ingestion_logger.log_ingestion_step("text_extraction", document_id, f"extracted {len(extracted_text)} chars, {len(extracted_content.structural_units)} units")
 
+            # Step 3.5: Rich Metadata Extraction
+            try:
+                if config.ingestion.enable_rich_metadata:
+                    step = tracker.start_step("rich_metadata_extraction")
+                    logger.info(f"✨ Extracting rich metadata with LLM for: {filename}")
+                    enhanced_metadata = self.metadata_enricher.enrich_document_with_llm(extracted_text, enhanced_metadata)
+                    
+                    tracker.complete_step("rich_metadata_extraction", {
+                        "keywords": len(enhanced_metadata.tags),
+                        "has_summary": bool(enhanced_metadata.custom_metadata.get('summary'))
+                    })
+                    processing_results['steps_completed'].append("rich_metadata_extraction")
+                    ingestion_logger.log_ingestion_step("rich_metadata_extraction", document_id, "rich metadata extracted")
+            except Exception as e:
+                logger.warning(f"Rich metadata extraction failed (non-critical): {str(e)}")
+                # Continue without rich metadata
+
             # Step 4: Chunking with Structural Awareness
             step = tracker.start_step("chunking")
             logger.info(f"✂️ Chunking document with structural awareness: {filename}")
-            chunks = self.chunker.chunk_document_with_structure(extracted_content, document_id)
+            
+            # Get embedding model if needed for semantic chunking
+            embedding_model = None
+            if self.chunker.config.enable_semantic_chunking:
+                embedding_model = self._get_embedding_model()
+                
+            chunks = self.chunker.chunk_document_with_structure(extracted_content, document_id, embedding_model)
 
             if not chunks:
                 tracker.fail_step("chunking", "No chunks produced")
@@ -353,12 +385,14 @@ class DocumentProcessor:
             logger.error(f"Error enhancing metadata: {str(e)}")
             return base_metadata
 
-    def _generate_embeddings_with_persistence(self, chunks: List[DocumentChunk], document_id: str, file_path: str, force_reprocess: bool = False) -> List[DocumentChunk]:
-        """Generate embeddings for document chunks with persistence checking"""
+    def _get_embedding_model(self):
+        """Get or load the embedding model"""
+        if self._embedding_model:
+            return self._embedding_model
+            
         try:
-            # Import here to avoid dependency issues
             from sentence_transformers import SentenceTransformer
-
+            
             # Load model (cached persistently)
             model_name = config.model.embedding_model
             model_cache_key = f"embedding_model_name_{model_name}"
@@ -373,6 +407,22 @@ class DocumentProcessor:
             else:
                 # Load model from cached name
                 model = SentenceTransformer(model_name)
+                
+            self._embedding_model = model
+            return model
+            
+        except Exception as e:
+            logger.error(f"Error loading embedding model: {str(e)}")
+            return None
+
+    def _generate_embeddings_with_persistence(self, chunks: List[DocumentChunk], document_id: str, file_path: str, force_reprocess: bool = False) -> List[DocumentChunk]:
+        """Generate embeddings for document chunks with persistence checking"""
+        try:
+            # Get model using helper
+            model = self._get_embedding_model()
+            if not model:
+                logger.warning("No embedding model available - skipping embedding generation")
+                return chunks
 
             # Prepare cache key for embeddings (used in both cache check and storage)
             file_hash = self._get_file_hash(file_path)
@@ -407,10 +457,6 @@ class DocumentProcessor:
 
             return chunks
 
-        except ImportError as e:
-            logger.error(f"SentenceTransformers not installed: {str(e)}")
-            logger.warning("Skipping embedding generation - chunks will be stored without embeddings")
-            return chunks
         except Exception as e:
             logger.error(f"Error generating embeddings: {str(e)}")
             logger.warning("Skipping embedding generation - chunks will be stored without embeddings")
@@ -555,20 +601,37 @@ class DocumentProcessor:
             # Remove from SQLite
             sqlite_success = sqlite_storage.delete_document(document_id)
             
-            if chromadb_success or sqlite_success:
+            if chromadb_success and sqlite_success:
                 # Remove from cache
-                cache_manager.set(f"doc_processed_{document_id}", None, ttl_hours=0)
-                cache_manager.set(f"doc_status_{document_id}", None, ttl_hours=0)
-
-                logger.info(f"Successfully removed document: {document_id}")
+                self._clear_document_cache(document_id)
+                logger.info(f"Successfully removed document from ALL stores: {document_id}")
                 return True
+            elif chromadb_success or sqlite_success:
+                # Partial success
+                self._clear_document_cache(document_id)
+                logger.warning(f"Partial deletion for {document_id}: ChromaDB={chromadb_success}, SQLite={sqlite_success}")
+                return True # Return true as we made best effort
             else:
-                logger.error(f"Failed to remove document from storage: {document_id}")
+                logger.error(f"Failed to remove document from ANY storage: {document_id}")
                 return False
 
         except Exception as e:
             logger.error(f"Error removing document {document_id}: {str(e)}")
             return False
+
+    def _clear_document_cache(self, document_id: str):
+        """Helper to clear all caches for a document"""
+        try:
+            cache_keys = [
+                f"doc_processed_{document_id}",
+                f"doc_status_{document_id}",
+                f"embeddings_{document_id}",
+                f"summary_{document_id}"
+            ]
+            for key in cache_keys:
+                cache_manager.set(key, None, ttl_hours=0)
+        except Exception as e:
+            logger.warning(f"Error clearing cache for {document_id}: {e}")
 
     def get_system_stats(self) -> Dict[str, Any]:
         """Get overall system statistics"""

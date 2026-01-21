@@ -208,8 +208,12 @@ class EnhancedPDFExtractor(EnhancedTextExtractor):
         return '\n'.join(text_parts), structural_units, metadata
 
     def _extract_with_fitz(self, file_path: str) -> Tuple[str, List[StructuralUnit], DocumentMetadata]:
-        """Extract using PyMuPDF with structure"""
+        """
+        Extract using PyMuPDF with smart structure detection based on font sizes.
+        Groups content into 'section' units based on detected headers.
+        """
         import fitz
+        from collections import Counter
 
         doc = fitz.open(file_path)
 
@@ -226,31 +230,126 @@ class EnhancedPDFExtractor(EnhancedTextExtractor):
             page_count=doc.page_count
         )
 
-        # Extract text with page structure
-        text_parts = []
-        structural_units = []
+        # 1. Analyze font sizes to identify body text and headers
+        font_sizes = []
+        for page in doc:
+            blocks = page.get_text("dict")["blocks"]
+            for b in blocks:
+                if b['type'] == 0:  # Text block
+                    for line in b["lines"]:
+                        for span in line["spans"]:
+                            if span["text"].strip():
+                                font_sizes.append(round(span["size"], 1))
+
+        if not font_sizes:
+            # Fallback for empty or image-only PDFs
+            doc.close()
+            return "", [], metadata
+
+        # Most common font size is likely body text
+        counter = Counter(font_sizes)
+        body_font_size = counter.most_common(1)[0][0]
         
-        for page_num in range(doc.page_count):
-            page = doc[page_num]
-            page_text = page.get_text()
-            if page_text.strip():
-                text_parts.append(page_text)
-                
-                # Create structural unit for page
-                structural_unit = StructuralUnit(
-                    unit_type="page",
-                    unit_index=page_num + 1,
-                    text=page_text,
-                    metadata={
-                        'page_number': page_num + 1,
-                        'text_length': len(page_text),
-                        'word_count': len(page_text.split())
-                    }
-                )
-                structural_units.append(structural_unit)
+        # Heuristic: Headers are usually larger than body text + threshold
+        header_threshold = body_font_size * 1.1
+
+        logger.info(f"PDF Analysis: Body font size ~{body_font_size}pt, Header threshold >{header_threshold}pt")
+
+        # 2. Extract content respecting structure
+        structural_units = []
+        text_parts = []
+        
+        current_section_title = "Introduction" # Default start
+        current_section_text = []
+        current_section_level = 1
+        section_index = 0
+        
+        for page_num, page in enumerate(doc):
+            blocks = page.get_text("dict")["blocks"]
+            
+            for b in blocks:
+                if b['type'] == 0:  # Text block
+                    block_text = ""
+                    is_header = False
+                    max_span_size = 0
+                    
+                    # Reconstruct block text and check font sizes
+                    for line in b["lines"]:
+                        line_text = ""
+                        for span in line["spans"]:
+                            line_text += span["text"]
+                            if len(span["text"].strip()) > 1: # Ignore tiny artifacts
+                                max_span_size = max(max_span_size, span["size"])
+                        block_text += line_text + " "
+                    
+                    block_text = block_text.strip()
+                    if not block_text:
+                        continue
+                        
+                    # Check if this block is a header
+                    if max_span_size >= header_threshold and len(block_text.split()) < 20: # Headers usually short
+                        is_header = True
+                    
+                    if is_header:
+                        # Close previous section if it has content
+                        if current_section_text:
+                            full_section_text = "\n".join(current_section_text)
+                            structural_units.append(StructuralUnit(
+                                unit_type="section",
+                                unit_index=section_index,
+                                text=full_section_text,
+                                heading=current_section_title,
+                                level=current_section_level,
+                                metadata={
+                                    'section_index': section_index,
+                                    'word_count': len(full_section_text.split()),
+                                    'page_start': page_num + 1 
+                                }
+                            ))
+                            text_parts.append(full_section_text)
+                            section_index += 1
+                        
+                        # Start new section
+                        current_section_title = block_text
+                        current_section_text = []
+                        # Estimate level based on size relative to body
+                        size_ratio = max_span_size / body_font_size
+                        current_section_level = 1 if size_ratio > 1.5 else 2
+                        
+                        # Add header itself to text parts but not necessarily as body of new section primarily
+                        # (Depending on preference, we usually want header to be part of the unit's heading, but maybe also strictly in text flow?)
+                        # Here: we treat the header as the TITLE of the new unit, so we don't add it to current_section_text.
+                        # BUT: for full text reconstruction, we need it.
+                        # Let's add it to the logical text of the unit so it's searchable.
+                        current_section_text.append(block_text)
+                        
+                    else:
+                        current_section_text.append(block_text)
+
+        # Close final section
+        if current_section_text:
+            full_section_text = "\n".join(current_section_text)
+            structural_units.append(StructuralUnit(
+                unit_type="section",
+                unit_index=section_index,
+                text=full_section_text,
+                heading=current_section_title,
+                level=current_section_level,
+                metadata={
+                    'section_index': section_index,
+                    'word_count': len(full_section_text.split()),
+                    'page_end': doc.page_count
+                }
+            ))
+            text_parts.append(full_section_text)
 
         doc.close()
-        return '\n'.join(text_parts), structural_units, metadata
+        
+        # If structure detection completely failed (e.g. OCR text all same size), fallback will have resulted in one giant section.
+        # That's acceptable, or we could fallback to page-based if units count is small?
+        # For now, this logic is better than just pages.
+        
+        return '\n\n'.join(text_parts), structural_units, metadata
 
 
 class EnhancedDocxExtractor(EnhancedTextExtractor):

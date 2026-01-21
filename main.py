@@ -88,6 +88,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from fastapi import Request
+import uuid
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """Add unique X-Request-ID to every request"""
+    request_id = str(uuid.uuid4())
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
+
 # Root endpoint
 @app.get("/")
 async def root():
